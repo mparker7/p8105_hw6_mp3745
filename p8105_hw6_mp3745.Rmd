@@ -8,9 +8,10 @@ output: github_document
 
 ```{r setup, include=FALSE}
 library(tidyverse)
-library(p8105.datasets)
 library(viridis)
-library(patchwork)
+library(skimr)
+library(modelr)
+
 
 knitr::opts_chunk$set(
 	echo = TRUE,
@@ -30,6 +31,118 @@ scale_fill_discrete = scale_fill_viridis_d
 
 theme_set(theme_minimal() + theme(legend.position = "bottom"))
 ```
+
+
+## Problem 1
+
+Read in and clean data
+```{r, message=FALSE}
+bw_df = 
+  read_csv("./data/birthweight.csv") %>% 
+  janitor::clean_names() %>% 
+  mutate(
+    babysex = factor(
+      recode(
+        babysex, 
+        "1" = "Male", 
+        "2" = "Female"
+      )
+    ),
+    frace = factor(
+      recode(
+        frace, 
+        "1" = "White", 
+        "2" = "Black", 
+        "3" = "Asian", 
+        "4" = "Puerto Rican",
+        "8" = "Other",
+        "9" = "Unkown"
+      )
+    ),
+    malform = factor(
+      recode(
+        malform,
+        "0" = "absent",
+        "1" = "present"
+      )
+    ),
+    mrace = factor(
+      recode(
+        mrace,
+        "1" = "White", 
+        "2" = "Black", 
+        "3" = "Asian", 
+        "4" = "Puerto Rican",
+        "8" = "Other"
+      )
+    )
+  )
+```
+The above code reads in the csv file, and coverts certain variable to factors with informative levels.
+
+
+Check for missing values and look at distribution of variables
+```{r}
+skimr::skim(bw_df) 
+```
+It looks like there are no missing values.
+
+
+The model I want to explore is looking at information about the mother (`fincome`, `menarche`, `mheight`, `momage`, `mrace`, `parity`, `pnumlbw`, `pnumsga`, `smoken`, `wtgain`).
+
+```{r}
+fit_mom = lm(bwt ~ fincome + menarche + mheight + momage + mrace + parity + pnumlbw + pnumsga + smoken + wtgain, data = bw_df) 
+
+fit_mom %>% 
+  broom::tidy() %>% 
+  knitr::kable(digits = 3)
+```
+
+Model diagnostics
+
+```{r}
+bw_df %>% 
+  modelr::add_predictions(fit_mom) %>% 
+  modelr::add_residuals(fit_mom) %>% 
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_smooth(se = FALSE)
+```
+From the residuals vs fitted plot, it looks as though the residuals are mostly randomly distributed around 0, which is what we want to see. When higher values are predicted (around 4,000), it looks like residuals tend to be negative.
+
+
+Compare model to 2 additional models using CV
+
+```{r}
+cv_df =
+  crossv_mc(bw_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)) %>% 
+  mutate(
+    mom_mod  = map(train, ~lm(bwt ~ fincome + menarche + mheight + momage + mrace + parity + pnumlbw + pnumsga + smoken + wtgain, data = .x)),
+    main_mod  = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    int_mod  = map(train, ~lm(bwt ~ bhead * blength * babysex, data = .x))
+  ) %>% 
+  mutate(
+    rmse_mom = map2_dbl(mom_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_main = map2_dbl(main_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_int = map2_dbl(int_mod, test, ~rmse(model = .x, data = .y))
+  ) 
+
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+
+Based on the plot of RMSE for each model, the interaction model has the lowest RMSE. Since the interaction model does the best job of making predictions on the testing data, that is the best model.
+
 
 
 
