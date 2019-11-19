@@ -11,6 +11,7 @@ library(tidyverse)
 library(viridis)
 library(skimr)
 library(modelr)
+library(patchwork)
 
 
 knitr::opts_chunk$set(
@@ -30,6 +31,8 @@ scale_colour_discrete = scale_colour_viridis_d
 scale_fill_discrete = scale_fill_viridis_d
 
 theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+set.seed(1)
 ```
 
 
@@ -78,6 +81,7 @@ bw_df =
     )
   )
 ```
+
 The above code reads in the csv file, and coverts certain variable to factors with informative levels.
 
 
@@ -85,21 +89,21 @@ Check for missing values and look at distribution of variables
 ```{r}
 skimr::skim(bw_df) 
 ```
-It looks like there are no missing values.
+
+It looks like there are no missing values and our outcome, `bwt` is approximately normally distributed.
 
 
-The model I want to explore is looking at information about the mother (`fincome`, `menarche`, `mheight`, `momage`, `mrace`, `parity`, `pnumlbw`, `pnumsga`, `smoken`, `wtgain`).
-
+The model I want to explore is looking at information about the mother (`fincome`, `menarche`, `mheight`, `momage`, `mrace`, `smoken`, `wtgain`). `parity`, `pnumlbw`, `pnumsga` not included since almost all values are 0.
 ```{r}
-fit_mom = lm(bwt ~ fincome + menarche + mheight + momage + mrace + parity + pnumlbw + pnumsga + smoken + wtgain, data = bw_df) 
+fit_mom = lm(bwt ~ fincome + menarche + mheight + momage + mrace + smoken + wtgain, data = bw_df) 
 
 fit_mom %>% 
   broom::tidy() %>% 
   knitr::kable(digits = 3)
 ```
 
-Model diagnostics
 
+Model diagnostics
 ```{r}
 bw_df %>% 
   modelr::add_predictions(fit_mom) %>% 
@@ -108,11 +112,11 @@ bw_df %>%
   geom_point() +
   geom_smooth(se = FALSE)
 ```
+
 From the residuals vs fitted plot, it looks as though the residuals are mostly randomly distributed around 0, which is what we want to see. When higher values are predicted (around 4,000), it looks like residuals tend to be negative.
 
 
 Compare model to 2 additional models using CV
-
 ```{r}
 cv_df =
   crossv_mc(bw_df, 100) %>% 
@@ -120,7 +124,7 @@ cv_df =
     train = map(train, as_tibble),
     test = map(test, as_tibble)) %>% 
   mutate(
-    mom_mod  = map(train, ~lm(bwt ~ fincome + menarche + mheight + momage + mrace + parity + pnumlbw + pnumsga + smoken + wtgain, data = .x)),
+    mom_mod  = map(train, ~lm(bwt ~ fincome + menarche + mheight + momage + mrace + smoken + wtgain, data = .x)),
     main_mod  = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
     int_mod  = map(train, ~lm(bwt ~ bhead * blength * babysex, data = .x))
   ) %>% 
@@ -141,9 +145,78 @@ cv_df %>%
   ggplot(aes(x = model, y = rmse)) + geom_violin()
 ```
 
-Based on the plot of RMSE for each model, the interaction model has the lowest RMSE. Since the interaction model does the best job of making predictions on the testing data, that is the best model.
+Based on the plot of RMSE for each model, the interaction model has the lowest RMSE.
 
 
+## Problem 2
+
+Download data
+```{r, cache=TRUE, message=FALSE}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
 
 
+Draw bootstrap samples to get estimates of `r_squared` and `log_beta0_beta1`
+```{r}
+weather_boot_est =
+  weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(models = map(strap, ~lm(tmax ~ tmin, data = .x) ),
+         estimates = map(models, broom::tidy),
+         evaluation = map(models, broom::glance)) %>% 
+  select(-strap, -models) %>% 
+  unnest(estimates, evaluation) %>% 
+  select(.id, term, estimate, r.squared) %>% 
+  pivot_wider(
+    names_from = "term",
+    values_from = "estimate"
+  ) %>% 
+  janitor::clean_names() %>% 
+  mutate(
+    log_beta0_beta1 = log(intercept * tmin)
+  ) %>% 
+  select(-intercept, -tmin)
+```
 
+
+Distributions of `r_squared` and `log_beta0_beta1`
+```{r}
+r_squared_dist = 
+  weather_boot_est %>% 
+  ggplot(aes(x = r_squared)) +
+  geom_density()
+
+log_betas_dist = 
+  weather_boot_est %>% 
+  ggplot(aes(x = log_beta0_beta1)) +
+  geom_density()  
+
+r_squared_dist + log_betas_dist
+```
+
+The distributions of `r_squared` and `log_beta0_beta1` look approximately normally distributed. The distribution of `r_squared` looks to be centered around 0.912, while the distribution of `log_beta0_beta1` is centered around 2.01.
+
+
+Get 95% confidence intervals for `r_squared` and `log_beta0_beta1`
+```{r}
+weather_ci =
+  weather_boot_est %>% 
+  summarize(
+    r_squared_low = quantile(r_squared, 0.025),
+    r_squared_high = quantile(r_squared, 0.975),
+    log_beta0_beta1_low = quantile(log_beta0_beta1, 0.025),
+    log_beta0_beta1_high = quantile(log_beta0_beta1, 0.975), 
+  )
+```
+
+The 95% confidence interval for `r_squared` is (`r weather_ci %>% pull(r_squared_low) %>% round(3)`, `r weather_ci %>% pull(r_squared_high) %>% round(3)`). The 95% confidence interval for `log_beta0_beta1` is (`r weather_ci %>% pull(log_beta0_beta1_low) %>% round(3)`, `r weather_ci %>% pull(log_beta0_beta1_high) %>% round(3)`)
